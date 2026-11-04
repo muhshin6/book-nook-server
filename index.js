@@ -115,6 +115,45 @@ app.get("/books/:id", verifyBookId, async (req, res) => {
   }
 });
 
+// 3. POST /books — add a book (public — user info comes from body)
+app.post("/books", authenticateJWT, async (req, res) => {
+  try {
+    const { title, author, category, description, totalCopies, image } =
+      req.body;
+
+    const userEmail = req.user.email;
+    const userName = req.user.name;
+
+    const newBook = {
+      title,
+      author,
+      category,
+      description,
+      totalCopies,
+      availableCopies: totalCopies,
+      image,
+      userName,
+      userEmail,
+      createdAt: new Date(),
+    };
+
+    const result = await booksCollection.insertOne(newBook);
+
+    res.status(201).send({
+      success: true,
+      message: "Book added successfully!",
+      insertedId: result.insertedId,
+    });
+  } catch (error) {
+    console.error("Add book error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to add book.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
