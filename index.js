@@ -1,7 +1,12 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
+import { jwtVerify, createRemoteJWKSet } from "jose";
 import "dotenv/config";
+
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.BETTER_AUTH_URL}/api/auth/jwks`),
+);
 
 const app = express();
 const port = 5000;
@@ -41,6 +46,38 @@ const verifyBookId = (req, res, next) => {
 
   next();
 };
+
+// JWT secret for session validation
+const JWT_SECRET = new TextEncoder().encode(process.env.BETTER_AUTH_SECRET);
+
+// Middleware: validate JWT session and attach user to req
+async function authenticateJWT(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).send({
+        success: false,
+        message: "Authentication required.",
+      });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    const { payload } = await jwtVerify(token, JWKS);
+
+    req.user = payload;
+
+    next();
+  } catch (error) {
+    console.error("JWT verification error:", error.message);
+
+    return res.status(401).send({
+      success: false,
+      message: "Invalid or expired token.",
+    });
+  }
+}
 
 // 1. GET /books — get all books (public)
 app.get("/books", async (req, res) => {
