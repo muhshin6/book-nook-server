@@ -4,37 +4,106 @@ import { MongoClient, ObjectId } from "mongodb";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import "dotenv/config";
 
-const JWKS = createRemoteJWKSet(
-  new URL(`${process.env.BETTER_AUTH_URL}/api/auth/jwks`),
-);
+const JWKS_CACHE = new Map();
+function getJWKS() {
+  const authUrl = process.env.BETTER_AUTH_URL;
+  if (!authUrl) {
+    throw new Error("BETTER_AUTH_URL environment variable is missing.");
+  }
+  if (!JWKS_CACHE.has(authUrl)) {
+    JWKS_CACHE.set(
+      authUrl,
+      createRemoteJWKSet(new URL(`${authUrl.replace(/\/$/, "")}/api/auth/jwks`)),
+    );
+  }
+  return JWKS_CACHE.get(authUrl);
+}
 
 const app = express();
-const port = 5000;
+const port = process.env.PORT || 5000;
 
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+const allowedOrigins = process.env.CLIENT_URL
+  ? process.env.CLIENT_URL.split(",").map((s) => s.trim().replace(/\/$/, ""))
+  : [];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, curl, or Postman)
+      if (!origin) return callback(null, true);
+
+      // If CLIENT_URL is not set or wildcard, allow
+      if (allowedOrigins.length === 0 || allowedOrigins.includes("*")) {
+        return callback(null, true);
+      }
+
+      const normalizedOrigin = origin.replace(/\/$/, "");
+
+      if (
+        allowedOrigins.includes(normalizedOrigin) ||
+        normalizedOrigin.startsWith("http://localhost:") ||
+        normalizedOrigin.endsWith(".vercel.app")
+      ) {
+        return callback(null, true);
+      }
+
+      return callback(null, true);
+    },
+    credentials: true,
+  }),
+);
 app.use(express.json());
 
-const client = new MongoClient(process.env.MONGODB_URI);
+// Database connection with serverless pooling & reconnection support
+let client = null;
+let db = null;
+let booksCollection = null;
+let borrowsCollection = null;
 
+async function initDb() {
+  if (db) return true;
+  if (!process.env.MONGODB_URI) {
+    console.warn("MONGODB_URI is not defined.");
+    return false;
+  }
+  try {
+    if (!client) {
+      client = new MongoClient(process.env.MONGODB_URI);
+    }
+    await client.connect();
+    db = client.db("book-nook");
+    booksCollection = db.collection("books");
+    borrowsCollection = db.collection("borrows");
+    console.log("Successfully connected to MongoDB!");
+    return true;
+  } catch (error) {
+    console.error("MongoDB connection error:", error.message);
+    return false;
+  }
+}
+
+// Attempt initial connection eagerly if URI is present
+if (process.env.MONGODB_URI) {
+  initDb().catch((err) => console.error("Initial DB connection attempt:", err.message));
+}
+
+// Health check endpoint
 app.get("/", (req, res) => {
   res.send("BookNook API is Running!");
 });
 
-async function connectToMongoDB() {
-  try {
-    await client.connect();
-    console.log("Successfully connected to MongoDB!");
-  } catch (error) {
-    console.error("MongoDB connection failed:", error);
-    process.exit(1);
+// Middleware to ensure DB is connected before handling data endpoints
+app.use(async (req, res, next) => {
+  if (req.path === "/") return next();
+  const connected = await initDb();
+  if (!connected) {
+    return res.status(500).send({
+      success: false,
+      message: "Database connection failed. Please check MONGODB_URI.",
+    });
   }
-}
-
-await connectToMongoDB();
-
-const db = client.db("book-nook");
-const booksCollection = db.collection("books");
-const borrowsCollection = db.collection("borrows");
+  next();
+});
 
 const verifyBookId = (req, res, next) => {
   if (!ObjectId.isValid(req.params.id)) {
@@ -46,9 +115,6 @@ const verifyBookId = (req, res, next) => {
 
   next();
 };
-
-// JWT secret for session validation
-const JWT_SECRET = new TextEncoder().encode(process.env.BETTER_AUTH_SECRET);
 
 // Middleware: validate JWT session and attach user to req
 async function authenticateJWT(req, res, next) {
@@ -64,7 +130,39 @@ async function authenticateJWT(req, res, next) {
 
     const token = authHeader.split(" ")[1];
 
-    const { payload } = await jwtVerify(token, JWKS);
+    let payload = null;
+    let verified = false;
+
+    // 1. Try remote JWKS if BETTER_AUTH_URL is provided
+    if (process.env.BETTER_AUTH_URL) {
+      try {
+        const jwks = getJWKS();
+        const result = await jwtVerify(token, jwks);
+        payload = result.payload;
+        verified = true;
+      } catch (jwksErr) {
+        console.warn("JWKS verification attempt failed:", jwksErr.message);
+      }
+    }
+
+    // 2. Fallback to BETTER_AUTH_SECRET if available
+    if (!verified && process.env.BETTER_AUTH_SECRET) {
+      try {
+        const secret = new TextEncoder().encode(process.env.BETTER_AUTH_SECRET);
+        const result = await jwtVerify(token, secret);
+        payload = result.payload;
+        verified = true;
+      } catch (secretErr) {
+        console.warn("Secret verification attempt failed:", secretErr.message);
+      }
+    }
+
+    if (!verified || !payload) {
+      return res.status(401).send({
+        success: false,
+        message: "Invalid or expired token.",
+      });
+    }
 
     req.user = payload;
 
@@ -470,7 +568,7 @@ app.delete("/borrows/:id", authenticateJWT, async (req, res) => {
 
 export default app;
 
-if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+if (!process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });
