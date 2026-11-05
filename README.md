@@ -107,7 +107,9 @@ The server connects to MongoDB on startup, then serves the `books` and `borrows`
 
 ## Deployment
 
-The project includes a `vercel.json` for deploying the Express app to Vercel. Configure `MONGODB_URI`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, and `CLIENT_URL` in the Vercel project settings, and set `CLIENT_URL` to the deployed client origin.
+The project deploys to Vercel as a zero-config Express app. `vercel.json` pins the function region to Singapore (`sin1`). `index.js` exports the Express app for Vercel and only calls `app.listen` outside Vercel (`process.env.VERCEL !== "1"`), so the same entry point works locally and in serverless.
+
+Configure `MONGODB_URI`, `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET`, and `CLIENT_URL` in the Vercel project settings. Set `CLIENT_URL` to the deployed client origin so CORS accepts browser requests.
 
 ## Related Repository
 
