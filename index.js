@@ -365,6 +365,89 @@ app.post("/borrows", authenticateJWT, async (req, res) => {
   }
 });
 
+// 7. GET /borrows — get borrows of the logged in user (protected)
+app.get("/borrows", authenticateJWT, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+
+    const borrows = await borrowsCollection.find({ userEmail }).toArray();
+
+    res.send(borrows);
+  } catch (error) {
+    console.error("Fetch borrows error:", error);
+
+    res.status(500).send({
+      message: "Failed to fetch borrows.",
+    });
+  }
+});
+
+// 8. DELETE /borrows/:id — return a book (protected)
+app.delete("/borrows/:id", authenticateJWT, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Try to find by borrow record _id first, then fall back to bookId
+    let borrow;
+    try {
+      borrow = await borrowsCollection.findOne({ _id: new ObjectId(id) });
+    } catch {}
+    if (!borrow) {
+      borrow = await borrowsCollection.findOne({
+        bookId: id,
+        status: "borrowed",
+      });
+    }
+
+    if (!borrow) {
+      return res.status(404).send({
+        success: false,
+        message: "Borrow record not found.",
+      });
+    }
+
+    if (borrow.status === "returned") {
+      return res.status(400).send({
+        success: false,
+        message: "Book already returned.",
+      });
+    }
+
+    await borrowsCollection.updateOne(
+      { _id: borrow._id },
+      {
+        $set: {
+          status: "returned",
+          returnDate: new Date(),
+        },
+      },
+    );
+
+    const book = await booksCollection.findOne({
+      _id: new ObjectId(borrow.bookId),
+    });
+
+    if (book) {
+      // Increase copies atomically with $inc
+      await booksCollection.updateOne(
+        { _id: new ObjectId(borrow.bookId) },
+        { $inc: { availableCopies: 1 } },
+      );
+    }
+
+    res.send({
+      success: true,
+      message: "Book returned successfully!",
+    });
+  } catch (error) {
+    console.error("Return book error:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to return book.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
