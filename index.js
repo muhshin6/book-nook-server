@@ -90,7 +90,27 @@ async function checkBookOwnership(bookId, userEmail) {
 // 1. GET /books — get all books (public)
 app.get("/books", async (req, res) => {
   try {
-    const books = await booksCollection.find({}).toArray();
+    const sort = req.query.sort;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 0;
+    const userEmail = req.query.userEmail;
+
+    const filter = {};
+    if (userEmail) {
+      filter.userEmail = userEmail;
+    }
+
+    let cursor = booksCollection.find(filter);
+
+    if (sort) {
+      const [field, order] = sort.split(":");
+      cursor = cursor.sort({ [field]: order === "desc" ? -1 : 1 });
+    }
+
+    if (limit > 0) {
+      cursor = cursor.limit(limit);
+    }
+
+    const books = await cursor.toArray();
 
     res.send(books);
   } catch (error) {
