@@ -257,6 +257,114 @@ app.delete("/books/:id", authenticateJWT, async (req, res) => {
   }
 });
 
+// 6. POST /borrows — borrow a book (protected)
+app.post("/borrows", authenticateJWT, async (req, res) => {
+  try {
+    const { bookId, bookTitle, bookImage } = req.body;
+
+    // Get authenticated user information from JWT
+    const userEmail = req.user.email;
+    const userId = req.user.id;
+    const userName = req.user.name;
+
+    if (!bookId || !ObjectId.isValid(bookId)) {
+      return res.status(400).send({
+        success: false,
+        message: "Valid bookId is required.",
+      });
+    }
+
+    if (!userEmail) {
+      return res.status(401).send({
+        success: false,
+        message: "User authentication failed.",
+      });
+    }
+
+    // Find book
+    const book = await booksCollection.findOne({
+      _id: new ObjectId(bookId),
+    });
+
+    if (!book) {
+      return res.status(404).send({
+        success: false,
+        message: "Book not found.",
+      });
+    }
+
+    // Check available copies
+    const availableCopies = Math.max(
+      0,
+      book.availableCopies ?? book.totalCopies ?? 1,
+    );
+
+    if (availableCopies <= 0) {
+      return res.status(400).send({
+        success: false,
+        message: "Book is not available for borrowing.",
+        code: "NOT_AVAILABLE",
+      });
+    }
+
+    // Prevent duplicate active borrowing
+    const existingBorrow = await borrowsCollection.findOne({
+      bookId,
+      userEmail,
+      status: "borrowed",
+    });
+
+    if (existingBorrow) {
+      return res.status(400).send({
+        success: false,
+        message: "You have already borrowed this book.",
+        code: "ALREADY_BORROWED",
+      });
+    }
+
+    // Create borrow record
+    const borrowRecord = {
+      bookId,
+      bookTitle: bookTitle ?? book.title,
+      bookImage: bookImage ?? book.image,
+      userId,
+      userName: userName ?? "Reader",
+      userEmail,
+      borrowDate: new Date(),
+      returnDate: null,
+      status: "borrowed",
+      createdAt: new Date(),
+    };
+
+    // Insert borrow record
+    const borrowResult = await borrowsCollection.insertOne(borrowRecord);
+
+    // Decrease available copies
+    await booksCollection.updateOne(
+      {
+        _id: new ObjectId(bookId),
+        availableCopies: { $gt: 0 },
+      },
+      {
+        $inc: { availableCopies: -1 },
+      },
+    );
+
+    res.status(201).send({
+      success: true,
+      message: "Book borrowed successfully!",
+      borrowId: borrowResult.insertedId,
+    });
+  } catch (error) {
+    console.error("Borrow book error:", error);
+
+    res.status(500).send({
+      success: false,
+      message: "Failed to borrow book.",
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
