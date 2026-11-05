@@ -468,10 +468,10 @@ app.delete("/borrows/:id", authenticateJWT, async (req, res) => {
   }
 });
 
-if (process.env.VERCEL !== "1") {
+export default app;
+
+if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
   app.listen(port, () => {
     console.log(`Server running on port ${port}`);
   });
 }
-
-export default app;
