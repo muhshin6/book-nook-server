@@ -1,7 +1,12 @@
 import express from "express";
 import cors from "cors";
 import { MongoClient, ObjectId } from "mongodb";
-import { jwtVerify, createRemoteJWKSet } from "jose";
+import {
+  jwtVerify,
+  createRemoteJWKSet,
+  decodeProtectedHeader,
+  importJWK,
+} from "jose";
 import "dotenv/config";
 
 const JWKS_CACHE = new Map();
@@ -116,6 +121,50 @@ const verifyBookId = (req, res, next) => {
   next();
 };
 
+// Verify a BetterAuth JWT against the signing key it stores in the shared
+// `jwks` collection. BetterAuth mints an asymmetric key pair in the database
+// (BETTER_AUTH_SECRET never signs these tokens), so reading the public key
+// straight from the database this server already connects to removes the
+// dependency on fetching `${BETTER_AUTH_URL}/api/auth/jwks` over the network.
+async function verifyWithDatabaseKey(token) {
+  if (!db) return null;
+
+  const header = decodeProtectedHeader(token);
+  if (!header?.kid) return null;
+
+  const jwks = db.collection("jwks");
+
+  // The adapter stores ids in `_id` (an ObjectId) and exposes them as `id`.
+  let keyDoc = null;
+  if (ObjectId.isValid(header.kid)) {
+    keyDoc = await jwks.findOne({ _id: new ObjectId(header.kid) });
+  }
+  if (!keyDoc) {
+    keyDoc = await jwks.findOne({ _id: header.kid });
+  }
+  if (!keyDoc) {
+    keyDoc = await jwks.findOne({ id: header.kid });
+  }
+  if (!keyDoc?.publicKey) return null;
+
+  try {
+    const alg = keyDoc.alg || header.alg;
+    if (!alg) return null;
+
+    const publicJwk = {
+      ...JSON.parse(keyDoc.publicKey),
+      alg,
+      kid: header.kid,
+    };
+    const key = await importJWK(publicJwk, alg);
+    const { payload } = await jwtVerify(token, key);
+    return payload;
+  } catch (error) {
+    console.warn("Database JWKS verification attempt failed:", error.message);
+    return null;
+  }
+}
+
 // Middleware: validate JWT session and attach user to req
 async function authenticateJWT(req, res, next) {
   try {
@@ -133,8 +182,16 @@ async function authenticateJWT(req, res, next) {
     let payload = null;
     let verified = false;
 
-    // 1. Try remote JWKS if BETTER_AUTH_URL is provided
-    if (process.env.BETTER_AUTH_URL) {
+    // 1. Try the signing key stored in the shared `jwks` collection
+    try {
+      payload = await verifyWithDatabaseKey(token);
+      verified = Boolean(payload);
+    } catch (dbKeyErr) {
+      console.warn("Database JWKS verification attempt failed:", dbKeyErr.message);
+    }
+
+    // 2. Try remote JWKS if BETTER_AUTH_URL is provided
+    if (!verified && process.env.BETTER_AUTH_URL) {
       try {
         const jwks = getJWKS();
         const result = await jwtVerify(token, jwks);
@@ -145,7 +202,7 @@ async function authenticateJWT(req, res, next) {
       }
     }
 
-    // 2. Fallback to BETTER_AUTH_SECRET if available
+    // 3. Fallback to BETTER_AUTH_SECRET if available
     if (!verified && process.env.BETTER_AUTH_SECRET) {
       try {
         const secret = new TextEncoder().encode(process.env.BETTER_AUTH_SECRET);
